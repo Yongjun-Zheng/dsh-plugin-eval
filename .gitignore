@@ -1,0 +1,8 @@
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+.dsh-dev/
+.dsh-eval/
+*.tgz
+*.log
