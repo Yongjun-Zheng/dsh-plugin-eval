@@ -4,7 +4,7 @@
 
 Agent 的顶层 turn 结束后，插件读取 DSH `workspaceChanges` 记录的精确变更，执行确定性规则和配置好的静态检查、单元测试或 E2E 命令，并将 JSON 报告写入工作区的 `.dsh-eval/results`。
 
-当前 MVP 支持：
+当前支持：
 
 - 基于 `workspace/changes` 的 turn 级触发，不把历史未提交修改误算到当前 turn。
 - 每个 Session 串行执行，并在 Agent 进入 idle 后通过 maintenance 阶段评测。
