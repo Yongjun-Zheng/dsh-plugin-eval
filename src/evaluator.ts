@@ -15,12 +15,36 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError()
 }
 
-function renderDiff(diff: Extract<WorkspaceFileDiff, { kind: 'text' }>): string {
-  const lines: string[] = [`--- a/${diff.display}`, `+++ b/${diff.display}`]
+function* renderedDiffLines(diff: Extract<WorkspaceFileDiff, { kind: 'text' }>): Generator<string> {
+  yield `--- a/${diff.display}`
+  yield `+++ b/${diff.display}`
   for (const hunk of diff.hunks) {
-    lines.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`, ...hunk.lines)
+    yield `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`
+    yield* hunk.lines
   }
-  return lines.join('\n')
+}
+
+function renderDiffWithinLimit(
+  diff: Extract<WorkspaceFileDiff, { kind: 'text' }>,
+  limit: number,
+): { text: string; addedLines: string[]; truncated: boolean } {
+  const parts: string[] = []
+  const addedLines: string[] = []
+  let used = 0
+  let first = true
+  for (const line of renderedDiffLines(diff)) {
+    const chunk = `${first ? '' : '\n'}${line}`
+    const available = Math.max(0, limit - used)
+    if (chunk.length > available) {
+      if (available > 0) parts.push(chunk.slice(0, available))
+      return { text: parts.join(''), addedLines, truncated: true }
+    }
+    parts.push(chunk)
+    used += chunk.length
+    first = false
+    if (line.startsWith('+') && !line.startsWith('+++')) addedLines.push(line.slice(1))
+  }
+  return { text: parts.join(''), addedLines, truncated: false }
 }
 
 async function collectEvidence(
@@ -43,17 +67,15 @@ async function collectEvidence(
       evidence.push({ path: diff.path, display: diff.display, kind: diff.kind, addedLines: [], truncated: false })
       continue
     }
-    const fullText = renderDiff(diff)
-    const keptText = remaining > 0 ? fullText.slice(0, remaining) : ''
-    const truncated = keptText.length < fullText.length
-    remaining -= keptText.length
+    const rendered = renderDiffWithinLimit(diff, remaining)
+    remaining -= rendered.text.length
     evidence.push({
       path: diff.path,
       display: diff.display,
       kind: 'text',
-      text: keptText,
-      addedLines: diff.hunks.flatMap(hunk => hunk.lines.filter(line => line.startsWith('+')).map(line => line.slice(1))),
-      truncated,
+      text: rendered.text,
+      addedLines: rendered.addedLines,
+      truncated: rendered.truncated,
     })
   }
   return evidence

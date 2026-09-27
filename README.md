@@ -7,7 +7,7 @@ Agent 的顶层 turn 结束后，插件读取 DSH `workspaceChanges` 记录的�
 当前支持：
 
 - 基于 `workspace/changes` 的 turn 级触发，不把历史未提交修改误算到当前 turn。
-- 每个 Session 串行执行，并在 Agent 进入 idle 后通过 maintenance 阶段评测。
+- 每个 Session 使用 FIFO 队列串行执行，不覆盖中间 turn，并在 Agent 进入 idle 后通过 maintenance 阶段评测。
 - 路径、正则、文件数和 diff 行数规则。
 - static、unit、e2e 三类命令检查。
 - `passed`、`failed`、`error`、`skipped` 明确分离。
@@ -128,4 +128,4 @@ Glob 支持 `*`、`**` 和 `?`，并统一使用 `/` 作为路径分隔符。
 - MVP 尚未加入 LLM Judge 和自动修复回路。
 - 命令在 profile 提供的 `ctx.shell` 执行器中运行；是否沙箱化由 DSH composition 决定。
 - 模式规则只检查 diff 的新增行，不扫描整个文件。
-- `workspaceChanges` 因文件上限或 diff 字符上限无法提供完整证据时，相关内容规则会 fail closed 为 `error`。
+- `workspaceChanges` 因文件上限或 diff 字符上限无法提供完整证据时，相关内容规则会 fail closed 为 `error`；报告中的 diff 文本与新增行证据受同一字符预算约束。

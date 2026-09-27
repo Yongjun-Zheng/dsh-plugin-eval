@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-shell'
 import type {} from '@deepseek-ai/dsh-workspace-changes'
 import { validateConfig } from './config.js'
 import { createEvaluator } from './evaluator.js'
+import { PendingJobs } from './pending-jobs.js'
 import { persistReport } from './report.js'
 import type {
   AgentEvaluator, CommandConfig, Config as PluginConfig, EvaluationReport, EvaluationRequest, RuleConfig,
@@ -134,7 +135,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     return
   }
 
-  const pending = new Map<SessionId, PendingJob>()
+  const pending = new PendingJobs<SessionId, PendingJob>()
   const draining = new Set<SessionId>()
 
   const drain = async (sessionId: SessionId): Promise<void> => {
@@ -142,9 +143,8 @@ export function apply(ctx: Context, config: PluginConfig): void {
     draining.add(sessionId)
     try {
       while (!lifetime.signal.aborted) {
-        const job = pending.get(sessionId)
+        const job = pending.dequeue(sessionId)
         if (job === undefined) break
-        pending.delete(sessionId)
         const agent = ctx.agents.get(sessionId)
         if (agent === undefined || agent.session !== job.session) {
           ctx.logger.warn(`agent-evaluator: live Agent not found for Session '${sessionId}'`)
@@ -171,7 +171,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'workspace/changes') return
-    pending.set(session.id, { session, eventSeq: event.seq, turn: event.data.turn })
+    pending.enqueue(session.id, { session, eventSeq: event.seq, turn: event.data.turn })
     void drain(session.id)
   })
   ctx.on('session/disposed', (session) => { pending.delete(session.id) })

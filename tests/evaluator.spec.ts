@@ -86,4 +86,37 @@ describe('evaluateTurn', () => {
     expect(report.verdict).toBe('skipped')
     expect(ran).toBe(false)
   })
+
+  it('caps added-line evidence with the global diff character budget', async () => {
+    const addedLines = Array.from({ length: 100 }, (_, index) => `+line-${index}`)
+    const deps: EvaluationDependencies = {
+      ...dependencies(0),
+      summary: () => ({
+        turn: 4,
+        cwd: '/workspace',
+        files: [{ path: 'src/large.ts', display: 'src/large.ts', added: 100, deleted: 0 }],
+        total: 1,
+        added: 100,
+        deleted: 0,
+      }),
+      diff: async () => ({
+        kind: 'text',
+        path: 'src/large.ts',
+        display: 'src/large.ts',
+        before: true,
+        after: true,
+        coarse: false,
+        hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 100, lines: addedLines }],
+      }),
+    }
+    const report = await evaluateTurn(
+      { ...baseConfig, maxDiffChars: 80, rules: [], commands: [] },
+      deps,
+      { sessionId, eventSeq: 10 },
+    )
+
+    expect(report.diffEvidence[0]?.text?.length).toBeLessThanOrEqual(80)
+    expect(report.diffEvidence[0]?.addedLines.length).toBeLessThan(100)
+    expect(report.diffEvidence[0]?.truncated).toBe(true)
+  })
 })
