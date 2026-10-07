@@ -38,6 +38,15 @@ describe('globToRegExp', () => {
     expect(globToRegExp('src\\**').test('src/a/b.ts')).toBe(true)
     expect(globToRegExp('src/*.ts').test('src/a/b.ts')).toBe(false)
   })
+
+  it('lets a double-star directory match zero or more complete directories', () => {
+    for (const path of ['index.ts', 'src/index.ts', 'src/nested/index.ts']) {
+      expect(globToRegExp('**/*.ts').test(path)).toBe(true)
+    }
+    expect(globToRegExp('src/**/*.ts').test('src/index.ts')).toBe(true)
+    expect(globToRegExp('src/**/test.ts').test('src/contest.ts')).toBe(false)
+    expect(globToRegExp('src/**/*.ts').test('other/index.ts')).toBe(false)
+  })
 })
 describe('evaluateRule', () => {
   it('rejects forbidden changed paths', () => {
@@ -65,5 +74,22 @@ describe('evaluateRule', () => {
       [{ ...evidence[0]!, truncated: true }, evidence[1]!],
     )
     expect(result.status).toBe('error')
+  })
+
+  it.each(['max-changed-files', 'max-diff-lines'] as const)('uses complete summary totals for %s even when the file list is capped', (kind) => {
+    const capped = { ...summary, files: summary.files.slice(0, 1) }
+    expect(evaluateRule({ id: 'budget', kind, limit: 1 }, capped, []).status).toBe('failed')
+    expect(evaluateRule({ id: 'budget', kind, limit: 5 }, capped, []).status).toBe('passed')
+    expect(evaluateRule({ id: 'paths', kind: 'forbidden-path', paths: ['**'] }, capped, []).status).toBe('error')
+  })
+
+  it('fails content rules closed when a changed file has no evidence', () => {
+    const check = evaluateRule({ id: 'pattern', kind: 'forbidden-pattern', pattern: 'secret' }, summary, [])
+    expect(check.status).toBe('error')
+  })
+
+  it('does not invent a source line number when evidence has no line mapping', () => {
+    const check = evaluateRule({ id: 'debugger', kind: 'forbidden-pattern', pattern: 'debugger' }, summary, evidence)
+    expect(check.findings[0]).not.toHaveProperty('line')
   })
 })

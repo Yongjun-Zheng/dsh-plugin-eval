@@ -15,36 +15,44 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError()
 }
 
-function* renderedDiffLines(diff: Extract<WorkspaceFileDiff, { kind: 'text' }>): Generator<string> {
-  yield `--- a/${diff.display}`
-  yield `+++ b/${diff.display}`
+function* renderedDiffLines(diff: Extract<WorkspaceFileDiff, { kind: 'text' }>): Generator<{ text: string; addedLine?: number }> {
+  yield { text: `--- a/${diff.display}` }
+  yield { text: `+++ b/${diff.display}` }
   for (const hunk of diff.hunks) {
-    yield `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`
-    yield* hunk.lines
+    yield { text: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@` }
+    let lineNumber = hunk.newStart
+    for (const text of hunk.lines) {
+      yield text.startsWith('+') ? { text, addedLine: lineNumber } : { text }
+      if (text.startsWith('+') || text.startsWith(' ')) lineNumber += 1
+    }
   }
 }
 
 function renderDiffWithinLimit(
   diff: Extract<WorkspaceFileDiff, { kind: 'text' }>,
   limit: number,
-): { text: string; addedLines: string[]; truncated: boolean } {
+): { text: string; addedLines: string[]; addedLineNumbers: number[]; truncated: boolean } {
   const parts: string[] = []
   const addedLines: string[] = []
+  const addedLineNumbers: number[] = []
   let used = 0
   let first = true
   for (const line of renderedDiffLines(diff)) {
-    const chunk = `${first ? '' : '\n'}${line}`
+    const chunk = `${first ? '' : '\n'}${line.text}`
     const available = Math.max(0, limit - used)
     if (chunk.length > available) {
       if (available > 0) parts.push(chunk.slice(0, available))
-      return { text: parts.join(''), addedLines, truncated: true }
+      return { text: parts.join(''), addedLines, addedLineNumbers, truncated: true }
     }
     parts.push(chunk)
     used += chunk.length
     first = false
-    if (line.startsWith('+') && !line.startsWith('+++')) addedLines.push(line.slice(1))
+    if (line.addedLine !== undefined) {
+      addedLines.push(line.text.slice(1))
+      addedLineNumbers.push(line.addedLine)
+    }
   }
-  return { text: parts.join(''), addedLines, truncated: false }
+  return { text: parts.join(''), addedLines, addedLineNumbers, truncated: false }
 }
 
 async function collectEvidence(
@@ -59,6 +67,7 @@ async function collectEvidence(
   for (let index = 0; index < fileCount; index += 1) {
     throwIfAborted(signal)
     const diff = await deps.diff(request.sessionId, request.eventSeq, index, signal)
+    throwIfAborted(signal)
     if (diff === undefined) {
       evidence.push({ path: `unknown-${index}`, display: `unknown-${index}`, kind: 'oversized', addedLines: [], truncated: true })
       continue
@@ -75,6 +84,7 @@ async function collectEvidence(
       kind: 'text',
       text: rendered.text,
       addedLines: rendered.addedLines,
+      addedLineNumbers: rendered.addedLineNumbers,
       truncated: rendered.truncated,
     })
   }
@@ -91,7 +101,7 @@ async function runCommandCheck(
   const started = now()
   try {
     const execution = await deps.runCommand(command, cwd, signal)
-    const status: CheckResult['status'] = execution.timedOut || execution.aborted
+    const status: CheckResult['status'] = execution.timedOut || execution.aborted || execution.exitCode === null
       ? 'error'
       : execution.exitCode === 0 ? 'passed' : 'failed'
     return {
@@ -104,7 +114,9 @@ async function runCommandCheck(
         ? `Command timed out after ${command.timeoutMs ?? 120_000} ms.`
         : execution.aborted
           ? 'Command was aborted.'
-          : `Command exited with code ${execution.exitCode}.`,
+          : execution.exitCode === null
+            ? 'Command terminated without an exit code.'
+            : `Command exited with code ${execution.exitCode}.`,
       findings: [],
       command: command.command,
       exitCode: execution.exitCode,
@@ -157,6 +169,7 @@ export async function evaluateTurn(
     for (const command of config.commands) {
       throwIfAborted(signal)
       checks.push(await runCommandCheck(deps, command, summary.cwd, signal, now))
+      throwIfAborted(signal)
     }
   }
 
@@ -181,11 +194,15 @@ export function createEvaluator(config: Config, deps: EvaluationDependencies): {
   evaluate(request: EvaluationRequest): Promise<EvaluationReport>
   latest(sessionId: SessionId): EvaluationReport | undefined
   remember(report: EvaluationReport): void
+  forget(sessionId: SessionId): void
+  clear(): void
 } {
   const latest = new Map<SessionId, EvaluationReport>()
   return {
     evaluate: request => evaluateTurn(config, deps, request),
     latest: sessionId => latest.get(sessionId),
     remember: report => { latest.set(report.sessionId as SessionId, report) },
+    forget: sessionId => { latest.delete(sessionId) },
+    clear: () => { latest.clear() },
   }
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { EvaluationReport } from './types.js'
 
@@ -26,7 +26,13 @@ export async function persistReport(reportDir: string, report: EvaluationReport)
   const path = resolve(directory, `turn-${report.turn}-${safeSegment(report.runId)}.json`)
   const complete: EvaluationReport = { ...report, artifactPath: path }
   const temporary = `${path}.${randomUUID()}.tmp`
-  await writeFile(temporary, `${JSON.stringify(complete, null, 2)}\n`, 'utf8')
-  await rename(temporary, path)
+  try {
+    await writeFile(temporary, `${JSON.stringify(complete, null, 2)}\n`, 'utf8')
+    await rename(temporary, path)
+  } catch (error: unknown) {
+    // Keep the write/rename error even if cleanup also fails.
+    await rm(temporary, { force: true }).catch(() => {})
+    throw error
+  }
   return complete
 }

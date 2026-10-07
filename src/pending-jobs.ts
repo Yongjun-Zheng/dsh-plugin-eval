@@ -36,4 +36,9 @@ export class PendingJobs<Key, Job extends SequencedJob> {
     this.queues.delete(key)
     this.lastEnqueued.delete(key)
   }
+
+  clear(): void {
+    this.queues.clear()
+    this.lastEnqueued.clear()
+  }
 }

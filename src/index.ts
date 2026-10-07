@@ -62,7 +62,6 @@ declare module '@deepseek-ai/cordis' {
 }
 
 interface PendingJob {
-  session: Session
   eventSeq: number
   turn: number
 }
@@ -76,14 +75,39 @@ function activeWorkError(error: unknown): boolean {
   return error instanceof Error && /active work|already has active/u.test(error.message)
 }
 
+function whenIdleOrAborted(agent: Agent, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort)
+      reject(signal.reason)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    Promise.resolve().then(() => {
+      signal.throwIfAborted()
+      return agent.whenIdle()
+    }).then(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, (error: unknown) => {
+      signal.removeEventListener('abort', onAbort)
+      reject(error)
+    })
+  })
+}
+
 async function runWhenIdle<T>(agent: Agent, lifetime: AbortSignal, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await agent.whenIdle()
-    if (lifetime.aborted) throw new Error('Evaluator plugin unloaded')
+    await whenIdleOrAborted(agent, lifetime)
+    lifetime.throwIfAborted()
+    let entered = false
     try {
-      return await agent.runMaintenance(signal => task(AbortSignal.any([lifetime, signal])))
+      return await agent.runMaintenance(signal => {
+        entered = true
+        return task(AbortSignal.any([lifetime, signal]))
+      })
     } catch (error: unknown) {
-      if (!activeWorkError(error) || attempt === 2) throw error
+      if (entered || !activeWorkError(error) || attempt === 2) throw error
     }
   }
   throw new Error('Unable to enter Agent maintenance phase')
@@ -92,7 +116,9 @@ async function runWhenIdle<T>(agent: Agent, lifetime: AbortSignal, task: (signal
 export function apply(ctx: Context, config: PluginConfig): void {
   validateConfig(config)
   const lifetime = new AbortController()
-  ctx.effect(() => () => { lifetime.abort() })
+  const pending = new PendingJobs<Session, PendingJob>()
+  const draining = new Map<Session, { controller: AbortController; task: Promise<void> }>()
+  const evaluations = new Map<Promise<EvaluationReport>, { sessionId: SessionId; controller: AbortController }>()
 
   const evaluator = createEvaluator(config, {
     summary: (sessionId, eventSeq) => ctx.workspaceChanges.summary(sessionId, eventSeq),
@@ -120,61 +146,88 @@ export function apply(ctx: Context, config: PluginConfig): void {
   })
 
   const service: AgentEvaluator = {
-    evaluate: async (request: EvaluationRequest) => {
-      const report = await evaluator.evaluate(request)
-      const persisted = await persistReport(config.reportDir, report)
-      evaluator.remember(persisted)
-      return persisted
+    evaluate: (request: EvaluationRequest) => {
+      const controller = new AbortController()
+      const signal = AbortSignal.any([lifetime.signal, controller.signal, ...(request.signal === undefined ? [] : [request.signal])])
+      const task = (async () => {
+        signal.throwIfAborted()
+        const report = await evaluator.evaluate({ ...request, signal })
+        signal.throwIfAborted()
+        const persisted = await persistReport(config.reportDir, report)
+        signal.throwIfAborted()
+        evaluator.remember(persisted)
+        return persisted
+      })()
+      evaluations.set(task, { sessionId: request.sessionId, controller })
+      void task.then(() => { evaluations.delete(task) }, () => { evaluations.delete(task) })
+      return task
     },
     latest: (sessionId: SessionId) => evaluator.latest(sessionId),
   }
   ctx.provide('agentEvaluator', service)
+
+  ctx.effect(() => async () => {
+    lifetime.abort()
+    pending.clear()
+    await Promise.allSettled([...Array.from(draining.values(), state => state.task), ...evaluations.keys()])
+    evaluator.clear()
+  })
+
+  ctx.on('session/disposed', (session) => {
+    pending.delete(session)
+    draining.get(session)?.controller.abort()
+    for (const evaluation of evaluations.values()) {
+      if (evaluation.sessionId === session.id) evaluation.controller.abort()
+    }
+    evaluator.forget(session.id)
+  })
 
   if (!config.enabled) {
     ctx.logger.info('agent-evaluator: disabled by configuration')
     return
   }
 
-  const pending = new PendingJobs<SessionId, PendingJob>()
-  const draining = new Set<SessionId>()
-
-  const drain = async (sessionId: SessionId): Promise<void> => {
-    if (draining.has(sessionId)) return
-    draining.add(sessionId)
-    try {
-      while (!lifetime.signal.aborted) {
-        const job = pending.dequeue(sessionId)
+  const drain = (session: Session): void => {
+    if (draining.has(session)) return
+    const sessionId = session.id
+    const controller = new AbortController()
+    const signal = AbortSignal.any([lifetime.signal, controller.signal])
+    const task = Promise.resolve().then(async () => {
+      while (!signal.aborted) {
+        const job = pending.dequeue(session)
         if (job === undefined) break
-        const agent = ctx.agents.get(sessionId)
-        if (agent === undefined || agent.session !== job.session) {
-          ctx.logger.warn(`agent-evaluator: live Agent not found for Session '${sessionId}'`)
-          continue
-        }
         try {
-          const report = await runWhenIdle(agent, lifetime.signal, signal => service.evaluate({
+          const agent = ctx.agents.get(sessionId)
+          if (agent === undefined || agent.session !== session) {
+            ctx.logger.warn(`agent-evaluator: live Agent not found for Session '${sessionId}'`)
+            continue
+          }
+          const report = await runWhenIdle(agent, signal, signal => service.evaluate({
             sessionId,
             eventSeq: job.eventSeq,
             signal,
           }))
+          signal.throwIfAborted()
           const passed = report.checks.filter(check => check.status === 'passed').length
           ctx.logger.info(`agent-evaluator: Session '${sessionId}' turn ${job.turn} ${report.verdict} (${passed}/${report.checks.length} checks); report: ${report.artifactPath ?? '(memory)'}`)
           ctx.emit('agent-eval/completed', report)
         } catch (error: unknown) {
-          if (!lifetime.signal.aborted) ctx.logger.error(`agent-evaluator: Session '${sessionId}' turn ${job.turn} failed: ${String(error)}`)
+          if (!signal.aborted) ctx.logger.error(`agent-evaluator: Session '${sessionId}' turn ${job.turn} failed: ${String(error)}`)
         }
       }
-    } finally {
-      draining.delete(sessionId)
-      if (pending.has(sessionId) && !lifetime.signal.aborted) void drain(sessionId)
-    }
+    }).finally(() => {
+      draining.delete(session)
+      if (pending.has(session) && !signal.aborted) drain(session)
+    })
+    draining.set(session, { controller, task })
   }
 
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'workspace/changes') return
-    pending.enqueue(session.id, { session, eventSeq: event.seq, turn: event.data.turn })
-    void drain(session.id)
+    if (lifetime.signal.aborted) return
+    pending.enqueue(session, { eventSeq: event.seq, turn: event.data.turn })
+    drain(session)
   })
-  ctx.on('session/disposed', (session) => { pending.delete(session.id) })
 }
 
 export default { name, inject, Config, apply }

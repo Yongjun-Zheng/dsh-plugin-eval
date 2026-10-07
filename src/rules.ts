@@ -12,8 +12,13 @@ export function globToRegExp(glob: string): RegExp {
     const char = normalized[index] as string
     if (char === '*') {
       if (normalized[index + 1] === '*') {
-        source += '.*'
-        index += 1
+        if ((index === 0 || normalized[index - 1] === '/') && normalized[index + 2] === '/') {
+          source += '(?:[^/]+/)*'
+          index += 2
+        } else {
+          source += '.*'
+          index += 1
+        }
       } else {
         source += '[^/]*'
       }
@@ -43,13 +48,19 @@ function result(rule: RuleConfig, status: CheckResult['status'], summary: string
 }
 
 function validateCompleteness(rule: RuleConfig, summary: WorkspaceChangesSummary, evidence: readonly DiffEvidence[]): CheckResult | undefined {
+  // DSH keeps these aggregates complete even when it caps the file list.
+  if (rule.kind === 'max-changed-files' || rule.kind === 'max-diff-lines') return undefined
   if (summary.total > summary.files.length) {
     return result(rule, 'error', 'Workspace change list was capped; the rule cannot inspect every changed file.', [{
       code: 'incomplete-file-list',
       message: `Only ${summary.files.length} of ${summary.total} changed files are available.`,
     }])
   }
-  if ((rule.kind === 'forbidden-pattern' || rule.kind === 'required-pattern') && evidence.some(item => item.truncated || item.kind !== 'text')) {
+  const availablePaths = new Set(evidence.map(item => normalizedPath(item.path)))
+  if ((rule.kind === 'forbidden-pattern' || rule.kind === 'required-pattern') && (
+    summary.files.some(file => !availablePaths.has(normalizedPath(file.path)))
+    || evidence.some(item => item.truncated || item.kind !== 'text')
+  )) {
     return result(rule, 'error', 'Diff evidence was incomplete; the content rule failed closed.', [{
       code: 'incomplete-diff',
       message: 'At least one changed file was binary, oversized, unavailable, or truncated.',
@@ -79,7 +90,7 @@ function patternRule(rule: RuleConfig, evidence: readonly DiffEvidence[], forbid
         findings.push({
           code: forbidden ? 'forbidden-pattern' : 'required-pattern',
           path: file.path,
-          line: index + 1,
+          ...(file.addedLineNumbers?.[index] === undefined ? {} : { line: file.addedLineNumbers[index] }),
           message: `Added line matched /${rule.pattern}/${rule.flags ?? 'u'}.`,
         })
       }

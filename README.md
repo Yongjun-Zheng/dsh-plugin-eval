@@ -8,6 +8,7 @@ Agent 的顶层 turn 结束后，插件读取 DSH `workspaceChanges` 记录的�
 
 - 基于 `workspace/changes` 的 turn 级触发，不把历史未提交修改误算到当前 turn。
 - 每个 Session 使用 FIFO 队列串行执行，不覆盖中间 turn，并在 Agent 进入 idle 后通过 maintenance 阶段评测。
+- Session 关闭会取消等待中和执行中的评测并释放报告缓存；插件卸载会取消任务并等待正在执行的评测退出。
 - 路径、正则、文件数和 diff 行数规则。
 - static、unit、e2e 三类命令检查。
 - `passed`、`failed`、`error`、`skipped` 明确分离。
@@ -28,6 +29,8 @@ pnpm test
 pnpm typecheck
 pnpm build
 ```
+
+可用 `pnpm check` 一次执行类型检查、全部测试和构建。请先确认 `node --version` 满足上述要求；测试包含真实 Cordis 插件生命周期和临时目录中的报告持久化，Agent、Shell 与工作区变更服务使用可控替身。
 
 仓库内的 `.dsh-dev/deepseek-harness` 是被 Git 忽略的官方 DSH 浅克隆，只用于本地 API 对照和集成测试。
 
@@ -104,7 +107,7 @@ dsh plugin --profile web add ./dsh-plugin-eval
 | `max-changed-files` | `limit` | 完整变更文件数超过限制时失败 |
 | `max-diff-lines` | `limit` | 新增行与删除行之和超过限制时失败 |
 
-Glob 支持 `*`、`**` 和 `?`，并统一使用 `/` 作为路径分隔符。
+Glob 支持 `*`、`**` 和 `?`，并统一使用 `/` 作为路径分隔符。`**/` 匹配零层或多层目录，例如 `src/**/*.ts` 同时匹配 `src/index.ts` 和 `src/lib/index.ts`。
 
 `severity: error` 是硬门禁；`severity: warning` 会保留 finding，但不会令总体评测失败。命令配置只能来自可信 profile，插件不会把模型输出或文件名拼接进命令。
 
@@ -123,9 +126,13 @@ Glob 支持 `*`、`**` 和 `?`，并统一使用 `/` 作为路径分隔符。
 3. 没有变更且未启用 `runWhenNoChanges`：`skipped`
 4. 其他情况：`passed`
 
+命令超时、执行器异常、命令中止或缺少退出码属于 `error`。当整个评测请求被取消时，`evaluate()` 拒绝并停止后续检查；自动评测不会发送完成事件。已进入磁盘写入阶段的报告仍可能落盘，但不会更新 `latest()` 缓存。
+
+模式规则 finding 的 `line` 是 turn 结束时文件中的实际行号。新增行证据的 `addedLineNumbers` 与 `addedLines` 一一对应；传入旧格式证据且没有行号映射时，finding 会省略 `line`。
+
 ## 当前边界
 
 - MVP 尚未加入 LLM Judge 和自动修复回路。
 - 命令在 profile 提供的 `ctx.shell` 执行器中运行；是否沙箱化由 DSH composition 决定。
 - 模式规则只检查 diff 的新增行，不扫描整个文件。
-- `workspaceChanges` 因文件上限或 diff 字符上限无法提供完整证据时，相关内容规则会 fail closed 为 `error`；报告中的 diff 文本与新增行证据受同一字符预算约束。
+- 文件列表被截断时，路径和内容规则会 fail closed 为 `error`；文件数与 diff 行数规则仍使用 DSH 提供的完整汇总计数。diff 缺失、非文本或被字符上限截断时，内容规则会返回 `error`；报告中的 diff 文本与新增行证据受同一字符预算约束。

@@ -71,6 +71,8 @@ export interface DiffEvidence {
   kind: WorkspaceFileDiff['kind']
   text?: string
   addedLines: string[]
+  /** Source line numbers in the turn-end file, aligned with addedLines. Absent in older evidence. */
+  addedLineNumbers?: number[]
   truncated: boolean
 }
 
